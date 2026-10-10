@@ -1,0 +1,263 @@
+{
+  "name": "Correo comercial → CRM (clasificación con IA)",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Correo comercial → CRM\n\n1. Una vez al día lee el buzón comercial (hasta 100 correos).\n2. Descarta correos internos y automáticos; quita el hilo citado.\n3. El modelo clasifica: derivación, solicitud directa u otro.\n4. **Derivación** → crea a la persona derivada (solo emails que aparecen en el correo). Fuente = Referencias.\n5. **Solicitud directa** → crea al remitente con los datos de su firma. Fuente = Tráfico directo.\n6. Si el contacto ya existe en el CRM, no se toca nada.\n\n**Antes de activar:** conecta las credenciales de Gmail, HubSpot (token de app privada) y Anthropic, y cambia `tuempresa.com` en el disparador, en \"Preparar correo\" y en el prompt.",
+        "height": 380,
+        "width": 540,
+        "color": 4
+      },
+      "id": "nota-01",
+      "name": "Nota",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -32,
+        -272
+      ]
+    },
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyDay",
+              "hour": 19,
+              "minute": 0
+            }
+          ]
+        },
+        "simple": false,
+        "maxResults": 100,
+        "filters": {
+          "includeSpamTrash": false,
+          "q": "in:inbox -from:tuempresa.com -category:promotions -category:social -category:updates",
+          "readStatus": "both"
+        },
+        "options": {
+          "downloadAttachments": false
+        }
+      },
+      "id": "gmail-trigger",
+      "name": "Nuevo correo en el buzón comercial",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        0,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Nodo Code \"Preparar correo\" (Run Once for All Items).\n// Limpia cada correo antes de pasarlo al modelo: descarta remitentes internos y automáticos,\n// corta el hilo citado y reúne los emails que aparecen de verdad en el mensaje.\n\n// Dominios de tu propia empresa: los correos internos se ignoran.\nconst DOMINIOS_PROPIOS = ['tuempresa.com'];\nconst REMITENTES_IGNORADOS = /^(no-?reply|noreply|mailer-daemon|postmaster|notificaciones|notifications?|bounce|newsletter)/i;\nconst REGEX_EMAIL = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/gi;\n\nconst esPropio = (email) => DOMINIOS_PROPIOS.some((d) => email.endsWith('@' + d));\nconst direcciones = (campo) => ((campo && campo.value) || [])\n  .map((v) => ({ email: String(v.address || '').toLowerCase().trim(), nombre: String(v.name || '').trim() }))\n  .filter((v) => v.email);\nconst formatear = (lista) => lista.map((v) => (v.nombre ? v.nombre + ' <' + v.email + '>' : v.email)).join(', ');\n\nconst salida = [];\n$input.all().forEach((item, indice) => {\n  const m = item.json;\n  const remitente = direcciones(m.from)[0] || { email: '', nombre: '' };\n  if (!remitente.email || esPropio(remitente.email) || REMITENTES_IGNORADOS.test(remitente.email)) return;\n\n  const para = direcciones(m.to);\n  const copia = direcciones(m.cc);\n\n  let texto = String(m.text || '');\n  if (!texto && m.html) texto = String(m.html).replace(/<br\\s*\\/?>/gi, '\\n').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ');\n\n  // Marcas habituales de \"aquí empieza el hilo citado\" en español e inglés.\n  const cortes = [\n    /^\\s*\\**(De|From|Enviado el|Sent)\\s*:\\**\\s/im,\n    /^\\s*El .{5,200}escribi[oó]:/im,\n    /^\\s*On .{5,200}wrote:/im,\n    /^-{2,}\\s*(Original Message|Mensaje original)/im,\n    /^_{8,}/m\n  ];\n  let fin = texto.length;\n  for (const r of cortes) {\n    const pos = texto.search(r);\n    if (pos > 0 && pos < fin) fin = pos;\n  }\n  const mensajeNuevo = texto.slice(0, fin).replace(/\\n{3,}/g, '\\n\\n').trim().slice(0, 4000);\n\n  // Solo se podrá crear en el CRM a personas cuyo email esté en esta lista.\n  const candidatos = [];\n  const anadir = (email) => {\n    if (email && !esPropio(email) && email !== remitente.email && !candidatos.includes(email)) candidatos.push(email);\n  };\n  para.concat(copia).forEach((v) => anadir(v.email));\n  (mensajeNuevo.match(REGEX_EMAIL) || []).forEach((e) => anadir(e.toLowerCase()));\n  const esRespuesta = /^\\s*(re|rv|fw|fwd|reenv)\\s*:/i.test(String(m.subject || '')) || fin < texto.length;\n\n  const textoParaIA = [\n    'Remitente: ' + formatear([remitente]),\n    'Para: ' + formatear(para),\n    'CC: ' + (formatear(copia) || '(nadie)'),\n    'Asunto: ' + (m.subject || ''),\n    'Fecha: ' + (m.date || ''),\n    'Es respuesta a un hilo previo: ' + (esRespuesta ? 'sí' : 'no'),\n    '',\n    'Mensaje nuevo (sin el hilo citado):',\n    mensajeNuevo || '(vacío)'\n  ].join('\\n');\n\n  salida.push({\n    json: {\n      gmailId: m.id || '',\n      threadId: m.threadId || '',\n      asunto: m.subject || '',\n      fecha: m.date || '',\n      remitenteEmail: remitente.email,\n      remitenteNombre: remitente.nombre,\n      candidatos: candidatos,\n      esRespuesta: esRespuesta,\n      mensajeNuevo: mensajeNuevo,\n      textoParaIA: textoParaIA\n    },\n    pairedItem: { item: indice }\n  });\n});\nreturn salida;\n"
+      },
+      "id": "preparar-correo",
+      "name": "Preparar correo",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/contacts/search",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"filterGroups\": [{ \"filters\": [{ \"propertyName\": \"email\", \"operator\": \"EQ\", \"value\": $json.remitenteEmail }] }], \"properties\": [\"company\", \"industry\"], \"limit\": 1 } }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "buscar-remitente",
+      "name": "Buscar remitente en HubSpot",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        480,
+        304
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "text": "={{ $('Preparar correo').item.json.textoParaIA }}",
+        "schemaType": "manual",
+        "inputSchema": "{\"type\":\"object\",\"properties\":{\"tipo\":{\"type\":\"string\",\"enum\":[\"derivacion\",\"solicitud_directa\",\"otro\"],\"description\":\"Clasificación del correo\"},\"motivo\":{\"type\":\"string\",\"description\":\"Frase corta con el porqué\"},\"remitente\":{\"type\":\"object\",\"description\":\"Datos del remitente (solo si tipo = solicitud_directa)\",\"properties\":{\"nombre\":{\"type\":\"string\"},\"apellido\":{\"type\":\"string\"},\"cargo\":{\"type\":\"string\"},\"empresa\":{\"type\":\"string\"},\"industria\":{\"type\":\"string\"},\"telefono\":{\"type\":\"string\"}}},\"contactos\":{\"type\":\"array\",\"description\":\"Personas derivadas (solo si tipo = derivacion)\",\"items\":{\"type\":\"object\",\"properties\":{\"email\":{\"type\":\"string\"},\"nombre\":{\"type\":\"string\"},\"apellido\":{\"type\":\"string\"},\"cargo\":{\"type\":\"string\"},\"empresa\":{\"type\":\"string\"},\"industria\":{\"type\":\"string\"},\"telefono\":{\"type\":\"string\"}},\"required\":[\"email\"]}}},\"required\":[\"tipo\",\"motivo\",\"contactos\"]}",
+        "options": {
+          "systemPromptTemplate": "Analizas correos que llegan al buzón comercial contacto@tuempresa.com de TU EMPRESA ([describe aquí en una línea qué vende y a quién]). Clasificas cada correo en uno de tres tipos y extraes los datos de contacto que correspondan.\n\nTIPOS (campo \"tipo\"):\n\n1. \"derivacion\": el remitente nos DERIVA a otra persona.\n- Dice que otra persona es quien ve el tema, quien decide o quien nos puede ayudar, y la pone en copia, la menciona o nos da su correo para escribirle.\n- O pone en copia a alguien que va a gestionar el tema con nosotros a partir de ahora (su asistente para agendar, el responsable del área, su reemplazo).\n- NO es derivación: respuestas automáticas de vacaciones con un reemplazo temporal, o personas en copia que el remitente no nombra ni presenta.\n- Datos en \"contactos\" (uno por persona derivada).\n\n2. \"solicitud_directa\": el remitente nos escribe por iniciativa propia como POSIBLE CLIENTE: pide cotización, precio, visita, disponibilidad o información sobre nuestros servicios.\n- Normalmente NO es respuesta a un hilo previo nuestro.\n- NO es solicitud: proveedores que nos ofrecen sus servicios o productos, postulaciones a empleo, bancos, facturas, cobranzas, publicidad, encuestas, notificaciones automáticas, ni respuestas de personas con las que ya estábamos conversando.\n- Datos del remitente en \"remitente\", sacados de la firma o del texto.\n\n3. \"otro\": cualquier otra cosa. Ante la duda, \"otro\".\n\nREGLAS DE EXTRACCIÓN:\n- Nunca inventes datos. Si algo no aparece en el correo, déjalo vacío.\n- Derivados: solo personas cuyo email aparece literalmente en el correo (Para, CC o cuerpo). Nunca incluyas al remitente ni direcciones de nuestro propio dominio.\n- nombre y apellido: separa nombres de apellidos. En países hispanohablantes suele haber dos apellidos: \"Jose Manuel Gonzalez Contreras\" → nombre \"Jose Manuel\", apellido \"Gonzalez Contreras\". Para el remitente usa la firma o, si no hay, el nombre que aparece junto a su dirección en \"Remitente\".\n- cargo: solo si se dice o se describe con claridad (ej.: \"lidera la operación en tienda\" → \"Líder de operación en tienda\").\n- empresa: si se indica en el texto o la firma, o si se deduce del dominio corporativo del email (ej.: acme.com → Acme). Nunca de dominios gmail, hotmail, outlook, yahoo o similares.\n- industria: uno de estos valores exactos o vacío: Alimentación, Educación, Minería, Hostelería, Oficinas, Industria, Salud, Otro. Ante la duda, vacío.\n- telefono: solo si aparece en el correo asociado a esa persona. Nunca uses teléfonos de las firmas de nuestro propio equipo.\n- motivo: una frase corta explicando la clasificación (para una solicitud, qué pide).\n- Si el tipo es \"otro\", deja \"contactos\" vacío y \"remitente\" vacío.\n"
+        }
+      },
+      "id": "clasificar",
+      "name": "Clasificar correo con Claude",
+      "type": "@n8n/n8n-nodes-langchain.informationExtractor",
+      "typeVersion": 1.2,
+      "position": [
+        720,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "claude-haiku-4-5-20251001"
+        },
+        "options": {
+          "maxTokensToSample": 1024,
+          "temperature": 0
+        }
+      },
+      "id": "modelo",
+      "name": "Claude Haiku",
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.6,
+      "position": [
+        720,
+        528
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Nodo Code \"Validar datos del contacto\" (Run Once for All Items).\n// El modelo propone; este nodo decide. Nada llega al CRM sin pasar por aquí:\n//  - solo se aceptan emails que aparecen literalmente en el correo (lista \"candidatos\"),\n//  - la industria tiene que ser un valor permitido,\n//  - los teléfonos se normalizan,\n//  - si el remitente ya existe en el CRM, no se crea de nuevo.\n\n// Valores permitidos de la propiedad \"industry\" en tu CRM.\nconst INDUSTRIAS = ['Alimentación', 'Educación', 'Minería', 'Hostelería', 'Oficinas', 'Industria', 'Salud', 'Otro'];\nconst DOMINIOS_GENERICOS = ['gmail.com', 'hotmail.com', 'outlook.com', 'yahoo.com', 'yahoo.es', 'live.com', 'icloud.com', 'hotmail.es', 'outlook.es', 'msn.com'];\nconst REGEX_EMAIL = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]{2,}$/;\n\nconst limpiar = (v) => String(v == null ? '' : v).replace(/\\s+/g, ' ').trim();\nconst titulo = (v) => limpiar(v).toLowerCase().replace(/(^|[\\s'-])(\\p{L})/gu, (a, sep, letra) => sep + letra.toUpperCase());\n\n// Normalización pensada para Chile (+56). Adáptala al país de tus contactos.\nconst normalizarTelefono = (v) => {\n  const bruto = limpiar(v);\n  if (!bruto) return '';\n  const digitos = bruto.replace(/\\D/g, '');\n  if (digitos.length < 8) return '';\n  if (bruto.startsWith('+')) return '+' + digitos;\n  if (digitos.length === 9 && digitos.startsWith('9')) return '+56' + digitos;\n  if (digitos.length === 11 && digitos.startsWith('56')) return '+' + digitos;\n  return bruto;\n};\nconst industriaValida = (v) => (INDUSTRIAS.includes(limpiar(v)) ? limpiar(v) : '');\nconst sinVacios = (o) => { Object.keys(o).forEach((k) => { if (!o[k]) delete o[k]; }); return o; };\n\nconst salida = [];\n$input.all().forEach((item, i) => {\n  const r = item.json.output || {};\n  const tipo = limpiar(r.tipo) || 'otro';\n  if (tipo !== 'derivacion' && tipo !== 'solicitud_directa') return;\n\n  const correo = $('Preparar correo').itemMatching(i).json;\n  const busqueda = $('Buscar remitente en HubSpot').itemMatching(i).json || {};\n  const remitenteCrm = ((busqueda.results || [])[0] || {}).properties || {};\n  const remitenteExiste = Number(busqueda.total || 0) > 0;\n  const dominioRemitente = correo.remitenteEmail.split('@')[1] || '';\n  const derivadoPor = correo.remitenteNombre ? correo.remitenteNombre + ' <' + correo.remitenteEmail + '>' : correo.remitenteEmail;\n\n  if (tipo === 'solicitud_directa') {\n    if (remitenteExiste) return;\n    const s = r.remitente || {};\n    let nombre = titulo(s.nombre);\n    let apellido = titulo(s.apellido);\n    if (!nombre && correo.remitenteNombre && !correo.remitenteNombre.includes('@')) {\n      const partes = titulo(correo.remitenteNombre).split(' ');\n      nombre = partes.shift() || '';\n      apellido = apellido || partes.join(' ');\n    }\n    const propiedades = sinVacios({\n      email: correo.remitenteEmail,\n      firstname: nombre,\n      lastname: apellido,\n      jobtitle: limpiar(s.cargo),\n      company: limpiar(s.empresa),\n      industry: industriaValida(s.industria),\n      phone: normalizarTelefono(s.telefono)\n    });\n    propiedades.hs_analytics_source = 'DIRECT_TRAFFIC';\n    salida.push({\n      json: { tipo: tipo, propiedades: propiedades, derivadoPor: '', motivo: limpiar(r.motivo), asunto: correo.asunto, gmailId: correo.gmailId },\n      pairedItem: { item: i }\n    });\n    return;\n  }\n\n  const vistos = [];\n  for (const c of (Array.isArray(r.contactos) ? r.contactos : [])) {\n    const email = limpiar(c.email).toLowerCase();\n    if (!REGEX_EMAIL.test(email)) continue;\n    if (!correo.candidatos.includes(email)) continue; // el modelo no puede inventar destinatarios\n    if (vistos.includes(email)) continue;\n    vistos.push(email);\n\n    // Si la persona derivada es de la misma empresa que el remitente, hereda empresa e industria del CRM.\n    const dominio = email.split('@')[1];\n    const mismaEmpresa = dominio === dominioRemitente && !DOMINIOS_GENERICOS.includes(dominio);\n\n    let industria = '';\n    if (mismaEmpresa && INDUSTRIAS.includes(remitenteCrm.industry)) industria = remitenteCrm.industry;\n    else industria = industriaValida(c.industria);\n\n    let empresa = limpiar(c.empresa);\n    if (mismaEmpresa && remitenteCrm.company) empresa = limpiar(remitenteCrm.company);\n\n    const propiedades = sinVacios({\n      email: email,\n      firstname: titulo(c.nombre),\n      lastname: titulo(c.apellido),\n      jobtitle: limpiar(c.cargo),\n      company: empresa,\n      industry: industria,\n      phone: normalizarTelefono(c.telefono)\n    });\n    propiedades.hs_analytics_source = 'REFERRALS';\n\n    salida.push({\n      json: { tipo: tipo, propiedades: propiedades, derivadoPor: derivadoPor, motivo: limpiar(r.motivo), asunto: correo.asunto, gmailId: correo.gmailId },\n      pairedItem: { item: i }\n    });\n  }\n});\nreturn salida;\n"
+      },
+      "id": "validar",
+      "name": "Validar datos del contacto",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1008,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/contacts",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"properties\": $json.propiedades } }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 10000
+        }
+      },
+      "id": "crear-contacto",
+      "name": "Crear contacto en HubSpot",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1248,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Nodo Code \"Comprobar resultado\" (Run Once for All Items).\n// Resume qué pasó con cada contacto y hace fallar la ejecución si el CRM rechazó alguno,\n// para que el error no pase inadvertido. Un 409 (ya existía) no es un error.\n\nconst resultados = $input.all().map((item, i) => {\n  const origen = $('Validar datos del contacto').itemMatching(i).json;\n  const codigo = Number(item.json.statusCode || 0);\n  const cuerpo = item.json.body || {};\n  let estado = 'error';\n  if (codigo === 201 || codigo === 200) estado = 'creado';\n  else if (codigo === 409) estado = 'ya existía';\n  return {\n    json: {\n      tipo: origen.tipo || '',\n      estado: estado,\n      email: origen.propiedades.email,\n      hubspotId: cuerpo.id || '',\n      derivadoPor: origen.derivadoPor,\n      asunto: origen.asunto,\n      detalle: estado === 'error' ? (cuerpo.message || JSON.stringify(cuerpo).slice(0, 300)) : ''\n    },\n    pairedItem: { item: i }\n  };\n});\nconst fallos = resultados.filter((r) => r.json.estado === 'error');\nif (fallos.length > 0) {\n  throw new Error('HubSpot rechazó ' + fallos.length + ' contacto(s): ' + fallos.map((f) => f.json.email + ' → ' + f.json.detalle).join(' | '));\n}\nreturn resultados;\n"
+      },
+      "id": "comprobar",
+      "name": "Comprobar resultado",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1488,
+        304
+      ]
+    }
+  ],
+  "connections": {
+    "Nuevo correo en el buzón comercial": {
+      "main": [
+        [
+          {
+            "node": "Preparar correo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar correo": {
+      "main": [
+        [
+          {
+            "node": "Buscar remitente en HubSpot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar remitente en HubSpot": {
+      "main": [
+        [
+          {
+            "node": "Clasificar correo con Claude",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude Haiku": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Clasificar correo con Claude",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clasificar correo con Claude": {
+      "main": [
+        [
+          {
+            "node": "Validar datos del contacto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validar datos del contacto": {
+      "main": [
+        [
+          {
+            "node": "Crear contacto en HubSpot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Crear contacto en HubSpot": {
+      "main": [
+        [
+          {
+            "node": "Comprobar resultado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

@@ -1,0 +1,166 @@
+{
+  "name": "Limpieza de contactos · 1 Proponer",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Limpieza de contactos · 1 Proponer\n\nLee todos los contactos de HubSpot y escribe en una Data Table las correcciones propuestas (nombres, teléfonos, email, empresa, país). **No modifica HubSpot.**\n\nRevisa la tabla, marca `aprobado` en lo que quieras aplicar y ejecuta después el flujo \"2 Aplicar\".\n\n**Antes de ejecutar:** crea la Data Table (columnas en el README), pon su ID en \"Guardar propuesta\", conecta la credencial de HubSpot y cambia `TU_PORTAL_ID` en el código.",
+        "height": 300,
+        "width": 520,
+        "color": 4
+      },
+      "id": "nota-02a",
+      "name": "Nota",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -32,
+        -336
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "disparo-02a",
+      "name": "Ejecutar análisis",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.hubapi.com/crm/v3/objects/contacts",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendQuery": true,
+        "specifyQuery": "keypair",
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "limit",
+              "value": "100"
+            },
+            {
+              "name": "archived",
+              "value": "false"
+            },
+            {
+              "name": "properties",
+              "value": "firstname,lastname,email,phone,mobilephone,company,country,hs_lead_status,hs_email_hard_bounce_reason_enum"
+            }
+          ]
+        },
+        "options": {
+          "pagination": {
+            "pagination": {
+              "paginationMode": "updateAParameterInEachRequest",
+              "parameters": {
+                "parameters": [
+                  {
+                    "type": "qs",
+                    "name": "after",
+                    "value": "={{ $response.body.paging.next.after }}"
+                  }
+                ]
+              },
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ $response.body.paging === undefined }}",
+              "limitPagesFetched": true,
+              "maxRequests": 60,
+              "requestInterval": 150
+            }
+          }
+        }
+      },
+      "id": "leer-contactos",
+      "name": "Leer contactos HubSpot",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        224,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Nodo Code \"Proponer correcciones\" (Run Once for All Items).\n// Recorre todos los contactos del CRM y escribe UNA FILA POR CAMBIO PROPUESTO. No modifica nada.\n// Cada fila guarda el valor actual (para poder revertir), el valor propuesto y la regla aplicada.\n//  - Cambios seguros (espacios, mayúsculas, formato de teléfono): aprobado = true.\n//  - Cambios dudosos (separar nombre y apellido, erratas de dominio): revisar = true.\n//  - Lo que el código no sabe arreglar se marca con regla \"FLAG:…\" y nunca se aplica solo.\n\nconst PORTAL = 'TU_PORTAL_ID'; // ID de tu portal de HubSpot, para el enlace directo a cada ficha\nconst LOTE = new Date().toISOString().slice(0, 10);\nconst NBSP = String.fromCharCode(160);\nconst out = [];\nconst contacts = [];\nfor (const it of $input.all()) {\n  const r = it.json.results || [];\n  for (const c of r) contacts.push(c);\n}\n\nfunction clean(s) {\n  if (s === null || s === undefined) return '';\n  s = String(s).split(NBSP).join(' ');\n  s = Array.from(s).filter(function (ch) { return ch.codePointAt(0) < 8192; }).join('');\n  return s.split(' ').filter(Boolean).join(' ');\n}\n// Texto mal codificado (ej.: \"JosÃ©\" en vez de \"José\").\nfunction fixMoji(s) {\n  if (!s || !/[ÃÂ]/.test(s)) return s;\n  try { return decodeURIComponent(escape(s)); } catch (e) { return s; }\n}\nconst PART = ['de', 'del', 'la', 'las', 'los', 'y', 'da', 'van', 'von', 'di', 'le'];\nfunction properCase(s) {\n  return s.split(' ').map(function (w, i) {\n    const lw = w.toLocaleLowerCase('es');\n    if (i > 0 && PART.indexOf(lw) >= 0) return lw;\n    return lw.split('-').map(function (p) { return p.charAt(0).toLocaleUpperCase('es') + p.slice(1); }).join('-');\n  }).join(' ');\n}\nfunction needsCase(s) {\n  if (!s) return false;\n  const hasLetters = s.toUpperCase() !== s.toLowerCase();\n  if (!hasLetters) return false;\n  if (s === s.toUpperCase() && s.replace(/[^A-Za-zÁÉÍÓÚÑÜ]/g, '').length > 1) return true;\n  if (s === s.toLowerCase()) return true;\n  return s.split(' ').some(function (w) { return w.length > 1 && (w === w.toLowerCase() && PART.indexOf(w) < 0); });\n}\nconst TITLES = ['dr', 'dr.', 'dra', 'dra.', 'ing', 'ing.', 'sr', 'sr.', 'sra', 'sra.', 'srta', 'srta.', 'don', 'doña'];\nfunction stripTitles(s) {\n  let w = s.split(' ');\n  while (w.length > 1 && TITLES.indexOf(w[0].toLowerCase()) >= 0) w = w.slice(1);\n  s = w.join(' ');\n  const low = s.toLowerCase();\n  const p = low.indexOf(', phd');\n  if (p > 0) s = s.slice(0, p);\n  return s.split('(s)').join('').split('(S)').join('').trim();\n}\nconst EMPRESA = ['spa', 'ltda', 'ltda.', 's.a', 's.a.', 'sa', 'limitada', 'eirl', 'e.i.r.l', 'comercial', 'inversiones', 'sociedad'];\nfunction looksCompany(s) {\n  return s.toLowerCase().split(' ').some(function (w) { return EMPRESA.indexOf(w) >= 0; });\n}\n\nfunction add(c, bloque, campo, actual, propuesto, regla, revisar) {\n  const isFlag = regla.indexOf('FLAG:') === 0;\n  out.push({ json: {\n    contact_id: String(c.id),\n    lead_status: (c.properties && c.properties.hs_lead_status) || '',\n    bloque: bloque, campo: campo,\n    valor_actual: actual === null || actual === undefined ? '' : String(actual),\n    valor_propuesto: propuesto === null || propuesto === undefined ? '' : String(propuesto),\n    regla: regla, revisar: !!revisar || isFlag,\n    aprobado: !revisar && !isFlag, aplicado: false,\n    url: 'https://app.hubspot.com/contacts/' + PORTAL + '/record/0-1/' + c.id,\n    lote: LOTE\n  } });\n}\n\n// Normalización a E.164 pensada para Chile (+56). Adáptala al país de tus contactos.\nfunction normPhone(raw) {\n  const s = String(raw).trim();\n  const all = s.replace(/[^0-9]/g, '');\n  if (!all || s.indexOf('*') >= 0 || all.length < 7 || new Set(all.split('')).size === 1) {\n    return { v: '', r: 'telefono_basura', rev: false };\n  }\n  const lw = s.toLowerCase();\n  let cut = -1;\n  ['ext', 'anexo', 'anx', ' x '].forEach(function (k) { const i = lw.indexOf(k); if (i > 0 && (cut < 0 || i < cut)) cut = i; });\n  const main = cut > 0 ? s.slice(0, cut) : s;\n  let plus = main.trim().charAt(0) === '+';\n  let d = main.replace(/[^0-9]/g, '');\n  if (d.indexOf('00') === 0) { d = d.slice(2); plus = true; }\n  if (plus && d.indexOf('56') !== 0) return { v: '+' + d, r: 'extranjero', rev: false, foreign: true };\n  if (d.indexOf('56') === 0 && d.length === 11) d = d.slice(2);\n  while (d.charAt(0) === '0') d = d.slice(1);\n  let r = cut > 0 ? 'formato_quita_extension' : 'formato_e164';\n  let rev = cut > 0;\n  if (d.length === 9 && d.charAt(0) !== '1') {\n    // móvil o fijo con el formato actual de 9 dígitos: ya es válido\n  } else if (d.length === 8 && d.charAt(0) === '2') {\n    d = '2' + d; r = 'fijo_santiago_antiguo'; rev = true;\n  } else if (d.length === 8 && '56789'.indexOf(d.charAt(0)) >= 0) {\n    d = '9' + d; r = 'movil_8_digitos'; rev = true;\n  } else {\n    return { v: s, r: 'FLAG:telefono_no_reconocido', rev: true };\n  }\n  return { v: '+56' + d, r: r, rev: rev };\n}\n\nconst PLACEHOLDER = ['x', 'xx', 'xxx', '-', '--', '.', 'na', 'n/a', 'no', 'ninguna', 'ninguno', 'particular', 'hogar', 'domicilio', 'casa', 'su empresa', 'empresa', 'mi empresa', 'test', 'prueba', 'independiente', 'personal', 'none', 'sin empresa'];\nconst TYPO = { 'gmial.com': 'gmail.com', 'gmai.com': 'gmail.com', 'gamil.com': 'gmail.com', 'gmail.co': 'gmail.com', 'gmail.con': 'gmail.com', 'hotmial.com': 'hotmail.com', 'hotmal.com': 'hotmail.com', 'hotmail.co': 'hotmail.com', 'hotmail.con': 'hotmail.com', 'yahooo.com': 'yahoo.com', 'outlok.com': 'outlook.com' };\nconst GENERIC = ['info', 'contacto', 'ventas', 'admin', 'administracion', 'recepcion', 'secretaria', 'gerencia', 'contact', 'hola', 'compras', 'rrhh', 'oficina', 'consultas', 'comercial'];\n\nconst stats = { contactos: contacts.length };\n\nfor (const c of contacts) {\n  const p = c.properties || {};\n  const fn0 = p.firstname || '';\n  const ln0 = p.lastname || '';\n  let fn = stripTitles(fixMoji(clean(fn0)));\n  let ln = stripTitles(fixMoji(clean(ln0)));\n  let nameRegla = [];\n  let nameRev = false;\n  if (fixMoji(fn0) !== fn0 || fixMoji(ln0) !== ln0) nameRegla.push('codificacion');\n\n  const fnHasParen = fn.indexOf('(') >= 0;\n  const lnHasParen = ln.indexOf('(') >= 0;\n  if (fnHasParen) { fn = fn.slice(0, fn.indexOf('(')).trim(); nameRegla.push('quita_parentesis'); nameRev = true; }\n  if (lnHasParen) { ln = ln.slice(0, ln.indexOf('(')).trim(); nameRegla.push('quita_parentesis'); nameRev = true; }\n\n  const isEmailName = fn.indexOf('@') >= 0 || ln.indexOf('@') >= 0;\n  const hasDigits = /[0-9]/.test(fn + ln);\n  const isCompany = looksCompany(fn + ' ' + ln);\n\n  if (!isEmailName && !hasDigits && !isCompany) {\n    const fw = fn.split(' ').filter(Boolean);\n    if (ln) {\n      // \"Ana Pérez\" en nombre y \"Pérez Soto\" en apellido → quita el apellido repetido del nombre.\n      const lw0 = ln.split(' ')[0].toLowerCase();\n      const idx = fw.findIndex(function (w, i) { return i > 0 && w.toLowerCase() === lw0; });\n      if (idx > 0) {\n        const lnRest = ln.split(' ').slice(1).join(' ');\n        const newLast = fw.slice(idx).join(' ');\n        ln = lnRest && newLast.toLowerCase().indexOf(lnRest.toLowerCase()) < 0 ? newLast + ' ' + lnRest : newLast;\n        fn = fw.slice(0, idx).join(' ');\n        nameRegla.push('apellido_duplicado');\n      }\n    } else if (fw.length >= 2) {\n      // Nombre completo en el campo nombre y apellido vacío: se separa, pero queda para revisar.\n      const nFirst = fw.length >= 4 ? 2 : 1;\n      ln = fw.slice(nFirst).join(' ');\n      fn = fw.slice(0, nFirst).join(' ');\n      nameRegla.push('separa_nombre_apellido');\n      nameRev = true;\n    }\n    if (needsCase(fn)) { fn = properCase(fn); nameRegla.push('mayusculas'); }\n    if (needsCase(ln)) { ln = properCase(ln); nameRegla.push('mayusculas'); }\n  }\n\n  if (fn0 !== fn || ln0 !== ln) {\n    const regla = nameRegla.length ? Array.from(new Set(nameRegla)).join('+') : 'espacios';\n    if (fn0 !== fn) add(c, 'nombre', 'firstname', fn0, fn, regla, nameRev);\n    if (ln0 !== ln) add(c, 'nombre', 'lastname', ln0, ln, regla, nameRev);\n  }\n  if (!fn0 && !ln0) add(c, 'nombre', 'firstname', '', '', 'FLAG:sin_nombre', true);\n  if (isEmailName) add(c, 'nombre', 'firstname', fn0, fn0, 'FLAG:nombre_es_email', true);\n  else if (hasDigits) add(c, 'nombre', 'firstname', fn0 + ' | ' + ln0, '', 'FLAG:nombre_con_numeros', true);\n  else if (isCompany) add(c, 'nombre', 'firstname', fn0 + ' | ' + ln0, '', 'FLAG:nombre_parece_empresa', true);\n  const full = (fn0 + ' ' + ln0 + ' ' + (p.email || '')).toLowerCase();\n  if (full.indexOf('test') >= 0 || full.indexOf('prueba') >= 0) add(c, 'otros', 'registro', fn0 + ' ' + ln0, '', 'FLAG:contacto_de_prueba', true);\n\n  const em = (p.email || '').trim();\n  if (em) {\n    const parts = em.split('@');\n    const nonAscii = Array.from(em).some(function (ch) { return ch.charCodeAt(0) > 127; });\n    if (parts.length !== 2 || parts[1].indexOf('.') < 0 || em.indexOf(' ') >= 0 || nonAscii) {\n      add(c, 'email', 'email', em, em, 'FLAG:email_formato_invalido', true);\n    } else {\n      const dom = parts[1].toLowerCase();\n      if (TYPO[dom]) add(c, 'email', 'email', em, parts[0] + '@' + TYPO[dom], 'errata_dominio', true);\n      if (GENERIC.indexOf(parts[0].toLowerCase()) >= 0) add(c, 'email', 'email', em, em, 'FLAG:email_generico', true);\n    }\n  }\n  if (p.hs_email_hard_bounce_reason_enum) add(c, 'email_rebote', 'email', em, em, 'FLAG:rebote_' + p.hs_email_hard_bounce_reason_enum, true);\n\n  let phoneNew = p.phone || '';\n  let mobNew = p.mobilephone || '';\n  if (p.phone) {\n    const n = normPhone(p.phone);\n    if (n.r.indexOf('FLAG:') === 0) add(c, 'telefono', 'phone', p.phone, p.phone, n.r, true);\n    else { phoneNew = n.v; if (n.v !== p.phone) add(c, 'telefono', 'phone', p.phone, n.v, n.r, n.rev); }\n  }\n  if (p.mobilephone) {\n    const n = normPhone(p.mobilephone);\n    if (n.r.indexOf('FLAG:') === 0) add(c, 'telefono', 'mobilephone', p.mobilephone, p.mobilephone, n.r, true);\n    else {\n      mobNew = n.v;\n      // Un fijo guardado en el campo de móvil se mueve al campo de teléfono.\n      const isLandline = n.v.indexOf('+56') === 0 && n.v.indexOf('+569') !== 0;\n      if (isLandline && !phoneNew) {\n        add(c, 'telefono', 'phone', p.phone || '', n.v, 'fijo_movido_desde_movil', false);\n        add(c, 'telefono', 'mobilephone', p.mobilephone, '', 'fijo_movido_a_phone', false);\n        phoneNew = n.v; mobNew = '';\n      } else if (isLandline && phoneNew === n.v) {\n        add(c, 'telefono', 'mobilephone', p.mobilephone, '', 'fijo_duplicado_en_movil', false);\n        mobNew = '';\n      } else if (n.v !== p.mobilephone) {\n        add(c, 'telefono', 'mobilephone', p.mobilephone, n.v, n.r, n.rev);\n      }\n    }\n  }\n\n  const co0 = p.company || '';\n  if (co0) {\n    let co = fixMoji(clean(co0));\n    const low = co.toLowerCase();\n    if (PLACEHOLDER.indexOf(low) >= 0 || /^[0-9 .-]+$/.test(co)) {\n      add(c, 'empresa', 'company', co0, '', 'empresa_placeholder', false);\n    } else {\n      if (co !== co0) add(c, 'empresa', 'company', co0, co, 'codificacion_o_espacios', false);\n      if (co.indexOf(' ') < 0 && /[.](cl|com|net|org|io|co)$/i.test(co)) add(c, 'empresa', 'company', co0, co0, 'FLAG:empresa_es_dominio', true);\n    }\n  }\n\n  // Si el teléfono es chileno y el país no lo dice, se propone \"Chile\".\n  const cl = phoneNew.indexOf('+56') === 0 || mobNew.indexOf('+56') === 0;\n  if (cl && p.country !== 'Chile') add(c, 'otros', 'country', p.country || '', 'Chile', p.country ? 'pais_corregido_por_telefono' : 'pais_desde_telefono', false);\n}\n\nif (out.length === 0) return [{ json: { contact_id: 'sin_cambios', bloque: 'resumen', regla: 'contactos=' + stats.contactos } }];\nreturn out;\n"
+      },
+      "id": "proponer",
+      "name": "Proponer correcciones",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "insert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "REEMPLAZAR_ID_DATA_TABLE"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": null
+        },
+        "options": {
+          "optimizeBulk": true
+        }
+      },
+      "id": "guardar-propuesta",
+      "name": "Guardar propuesta",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        672,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Ejecutar análisis": {
+      "main": [
+        [
+          {
+            "node": "Leer contactos HubSpot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Leer contactos HubSpot": {
+      "main": [
+        [
+          {
+            "node": "Proponer correcciones",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Proponer correcciones": {
+      "main": [
+        [
+          {
+            "node": "Guardar propuesta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

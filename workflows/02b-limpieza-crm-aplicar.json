@@ -1,0 +1,228 @@
+{
+  "name": "Limpieza de contactos · 2 Aplicar",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Limpieza de contactos · 2 Aplicar\n\nAplica en HubSpot (batch update, lotes de 100) las filas aprobadas de la Data Table y las marca como aplicadas. La columna `valor_actual` queda como respaldo para revertir.\n\nLos avisos `FLAG:` nunca se aplican solos. Las excepciones revisadas a mano se anotan en \"Preparar lotes\".",
+        "height": 250,
+        "width": 520,
+        "color": 4
+      },
+      "id": "nota-02b",
+      "name": "Nota",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -32,
+        -288
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "disparo-02b",
+      "name": "Aplicar cambios",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "REEMPLAZAR_ID_DATA_TABLE"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "aplicado",
+              "condition": "isFalse"
+            }
+          ]
+        },
+        "returnAll": true
+      },
+      "id": "leer-propuesta",
+      "name": "Leer propuesta pendiente",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        224,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Nodo Code \"Preparar lotes\" (Run Once for All Items).\n// Lee las filas pendientes de la tabla de propuestas, decide cuáles se aplican y las agrupa\n// en lotes de 100 contactos, que es el máximo del endpoint batch/update de HubSpot.\n\n// Excepciones decididas por una persona al revisar la propuesta. Se rellenan en cada limpieza.\nconst EXCLUIR_SEPARACION = [];   // IDs de contacto donde NO hay que separar nombre y apellido\nconst MANUAL = {};               // correcciones a mano: { '12345': { firstname: 'Ana María', lastname: 'Pérez' } }\nconst IGNORAR_FILA = {};         // filas a saltar: { '12345|mobilephone': true }\n\nfunction aprobar(r) {\n  if (String(r.regla).indexOf('FLAG:') === 0) return false; // los avisos nunca se aplican solos\n  if (IGNORAR_FILA[r.contact_id + '|' + r.campo]) return false;\n  if (r.aprobado === true) return true;\n  if (r.regla.indexOf('separa_nombre') >= 0) return EXCLUIR_SEPARACION.indexOf(r.contact_id) < 0;\n  if (r.bloque === 'telefono') return true;\n  if (r.regla.indexOf('quita_parentesis') >= 0) return true;\n  if (r.regla.indexOf('errata_dominio') >= 0) return true;\n  return false;\n}\n\nconst porContacto = {};\nconst filasPorContacto = {};\nfor (const it of $input.all()) {\n  const r = it.json;\n  if (!aprobar(r)) continue;\n  if (!porContacto[r.contact_id]) { porContacto[r.contact_id] = {}; filasPorContacto[r.contact_id] = []; }\n  porContacto[r.contact_id][r.campo] = r.valor_propuesto === null || r.valor_propuesto === undefined ? '' : r.valor_propuesto;\n  filasPorContacto[r.contact_id].push(r.id);\n}\nfor (const id of Object.keys(MANUAL)) {\n  if (!porContacto[id]) { porContacto[id] = {}; filasPorContacto[id] = []; }\n  Object.assign(porContacto[id], MANUAL[id]);\n}\n\nconst ids = Object.keys(porContacto);\nconst lotes = [];\nfor (let i = 0; i < ids.length; i += 100) {\n  const chunk = ids.slice(i, i + 100);\n  const inputs = chunk.map(function (id) { return { id: id, properties: porContacto[id] }; });\n  let rowIds = [];\n  chunk.forEach(function (id) { rowIds = rowIds.concat(filasPorContacto[id]); });\n  lotes.push({ json: { body: { inputs: inputs }, rowIds: rowIds, contactos: chunk.length } });\n}\nreturn lotes;\n"
+      },
+      "id": "preparar-lotes",
+      "name": "Preparar lotes",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/contacts/batch/update",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 400
+            }
+          }
+        }
+      },
+      "id": "actualizar-hubspot",
+      "name": "Actualizar HubSpot (batch)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        672,
+        0
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Nodo Code \"Filas aplicadas\" (Run Once for All Items).\n// Solo los lotes que HubSpot confirma como COMPLETE se marcan como aplicados en la tabla.\n// Si un lote falla, sus filas siguen pendientes y se pueden reintentar.\n\nconst lotes = $('Preparar lotes').all();\nconst out = [];\n$input.all().forEach(function (it, i) {\n  const ok = it.json && it.json.status === 'COMPLETE';\n  if (!ok) return;\n  (lotes[i].json.rowIds || []).forEach(function (rid) { out.push({ json: { rowId: rid } }); });\n});\nreturn out;\n"
+      },
+      "id": "filas-aplicadas",
+      "name": "Filas aplicadas",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        896,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "update",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "REEMPLAZAR_ID_DATA_TABLE"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "condition": "eq",
+              "keyValue": "={{ $json.rowId }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "aplicado": true
+          },
+          "schema": [
+            {
+              "id": "aplicado",
+              "displayName": "aplicado",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "boolean",
+              "canBeUsedToMatch": true
+            }
+          ]
+        }
+      },
+      "id": "marcar-aplicado",
+      "name": "Marcar como aplicado",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        1120,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Aplicar cambios": {
+      "main": [
+        [
+          {
+            "node": "Leer propuesta pendiente",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Leer propuesta pendiente": {
+      "main": [
+        [
+          {
+            "node": "Preparar lotes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar lotes": {
+      "main": [
+        [
+          {
+            "node": "Actualizar HubSpot (batch)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Actualizar HubSpot (batch)": {
+      "main": [
+        [
+          {
+            "node": "Filas aplicadas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filas aplicadas": {
+      "main": [
+        [
+          {
+            "node": "Marcar como aplicado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
