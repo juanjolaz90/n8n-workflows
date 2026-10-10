@@ -8,7 +8,7 @@ valores de ejemplo.
 > **In English.** Production n8n workflows I built for B2B companies, published in anonymized
 > form: an AI email-to-CRM lead classifier, a two-step CRM data cleanup with human approval, and
 > the architecture of an AI quote generator. Code and docs are in Spanish. More about my work at
-> [exponencialesfirm.es/en](https://exponencialesfirm.es/en/).
+> [exponencialesfirm.com/en](https://exponencialesfirm.com/en/).
 
 | # | Flujo | Qué resuelve | Piezas |
 |---|---|---|---|
@@ -165,4 +165,4 @@ tu propio entorno.
 
 ---
 
-Juanjo Lazcano · [exponencialesfirm.es](https://exponencialesfirm.es) · Consultor de CRM, automatización e IA
+Juanjo Lazcano · [exponencialesfirm.com](https://exponencialesfirm.com) · Consultor de CRM, automatización e IA
