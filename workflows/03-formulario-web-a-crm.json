@@ -1,0 +1,357 @@
+{
+  "name": "Formulario web → CRM (sin el filtro de spam de HubSpot)",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Formulario web → CRM\n\nRecibe el formulario de tu web (contacto o lista de espera) y crea el contacto en HubSpot.\n\n1. Valida los datos y descarta robots (campo trampa `empresa_web`).\n2. Guarda el envío en una Data Table: si HubSpot falla, no se pierde.\n3. Crea o actualiza el contacto en HubSpot por la API de CRM (upsert por email).\n4. Responde a la web y avisa por correo.\n\n**Antes de activar:** cambia el dominio en \"Allowed Origins\" del Webhook, crea la Data Table (columnas en el README) y pon su ID, conecta HubSpot (Bearer con un token de app privada con `crm.objects.contacts.write`) y Gmail, y cambia `tu@correo.com`.",
+        "height": 360,
+        "width": 560,
+        "color": 4
+      },
+      "id": "nota-03",
+      "name": "Nota",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -32,
+        -352
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "contacto-web",
+        "authentication": "none",
+        "responseMode": "responseNode",
+        "options": {
+          "allowedOrigins": "https://tudominio.com"
+        }
+      },
+      "id": "webhook-03",
+      "name": "Formulario de la web",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        96
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Nodo Code \"Validar envío\" (Run Once for All Items).\n// Limpia y valida lo que manda el formulario de la web. Siempre devuelve un único item,\n// con \"valido\" a true o false, para que el If siguiente decida qué contestar.\n\nconst ETIQUETA_LISTA = 'Lista de espera'; // texto que identifica en el CRM a quien se apunta a la lista\n\nconst cuerpo = $input.first().json.body || {};\nconst limpiar = (v, max) => String(v == null ? '' : v).replace(/\\s+/g, ' ').trim().slice(0, max);\n\nconst firstname = limpiar(cuerpo.firstname, 80);\nconst lastname = limpiar(cuerpo.lastname, 80);\nconst email = limpiar(cuerpo.email, 160).toLowerCase();\nconst phone = limpiar(cuerpo.phone, 40);\nconst tipo = cuerpo.tipo === 'lista_espera' ? 'lista_espera' : 'contacto';\n\nlet message = String(cuerpo.message == null ? '' : cuerpo.message).trim().slice(0, 3000);\nif (tipo === 'lista_espera') {\n  message = ETIQUETA_LISTA + (message ? ' — ' + message : '');\n}\n\n// \"empresa_web\" es un campo trampa oculto: una persona nunca lo rellena.\nlet motivo = '';\nif (limpiar(cuerpo.empresa_web, 50)) motivo = 'trampa';\nelse if (!firstname || !lastname) motivo = 'faltan_datos';\nelse if (!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]{2,}$/.test(email)) motivo = 'correo_invalido';\n\n// Solo las propiedades con valor: así un campo vacío no borra un dato que ya estaba en el CRM.\nconst propiedades = { email: email, firstname: firstname, lastname: lastname };\nif (phone) propiedades.phone = phone;\nif (message) propiedades.message = message;\n\nreturn [{\n  json: {\n    valido: motivo === '',\n    motivo: motivo,\n    tipo: tipo,\n    firstname: firstname,\n    lastname: lastname,\n    email: email,\n    phone: phone,\n    message: message,\n    pagina: limpiar(cuerpo.pagina, 300),\n    fecha: new Date().toISOString(),\n    propiedades: propiedades\n  }\n}];\n"
+      },
+      "id": "validar-03",
+      "name": "Validar envío",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        272,
+        224
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.valido }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              },
+              "rightValue": ""
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "si-valido-03",
+      "name": "¿Envío válido?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        496,
+        224
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "insert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "REEMPLAZAR_ID_DATA_TABLE"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "fecha": "={{ $(\"Validar envío\").item.json.fecha }}",
+            "tipo": "={{ $(\"Validar envío\").item.json.tipo }}",
+            "nombre": "={{ $(\"Validar envío\").item.json.firstname }}",
+            "apellido": "={{ $(\"Validar envío\").item.json.lastname }}",
+            "correo": "={{ $(\"Validar envío\").item.json.email }}",
+            "telefono": "={{ $(\"Validar envío\").item.json.phone }}",
+            "mensaje": "={{ $(\"Validar envío\").item.json.message }}",
+            "pagina": "={{ $(\"Validar envío\").item.json.pagina }}"
+          },
+          "schema": [
+            {
+              "id": "fecha",
+              "displayName": "fecha",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "tipo",
+              "displayName": "tipo",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "nombre",
+              "displayName": "nombre",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "apellido",
+              "displayName": "apellido",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "correo",
+              "displayName": "correo",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "telefono",
+              "displayName": "telefono",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "mensaje",
+              "displayName": "mensaje",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "pagina",
+              "displayName": "pagina",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ]
+        }
+      },
+      "id": "guardar-03",
+      "name": "Guardar envío",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        800,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/contacts/batch/upsert",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ inputs: [{ idProperty: \"email\", id: $(\"Validar envío\").item.json.email, properties: $(\"Validar envío\").item.json.propiedades }] }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 10000
+        }
+      },
+      "id": "hubspot-03",
+      "name": "Crear o actualizar contacto en HubSpot",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1024,
+        320
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{ \"ok\": true }",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "responder-ok-03",
+      "name": "Responder a la web: recibido",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1328,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "tu@correo.com",
+        "subject": "={{ ($(\"Validar envío\").item.json.tipo === \"lista_espera\" ? \"Lista de espera\" : \"Contacto web\") + \": \" + $(\"Validar envío\").item.json.firstname + \" \" + $(\"Validar envío\").item.json.lastname }}",
+        "emailType": "text",
+        "message": "={{ \"Nuevo envío desde la web (\" + $(\"Validar envío\").item.json.tipo + \")\n\nNombre: \" + $(\"Validar envío\").item.json.firstname + \" \" + $(\"Validar envío\").item.json.lastname + \"\nCorreo: \" + $(\"Validar envío\").item.json.email + \"\nTeléfono: \" + ($(\"Validar envío\").item.json.phone || \"(no indicó)\") + \"\nPágina: \" + $(\"Validar envío\").item.json.pagina + \"\n\nMensaje:\n\" + ($(\"Validar envío\").item.json.message || \"(sin mensaje)\") + \"\n\nHubSpot: \" + ([200, 201, 207].includes($(\"Crear o actualizar contacto en HubSpot\").item.json.statusCode) ? \"contacto creado o actualizado\" : \"NO se pudo guardar el contacto (código \" + $(\"Crear o actualizar contacto en HubSpot\").item.json.statusCode + \"). Los datos están en la Data Table.\") }}",
+        "options": {
+          "appendAttribution": false,
+          "replyTo": "={{ $(\"Validar envío\").item.json.email }}"
+        }
+      },
+      "id": "avisar-03",
+      "name": "Avisar por correo",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1552,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: false, motivo: $(\"Validar envío\").item.json.motivo }) }}",
+        "options": {
+          "responseCode": 400
+        }
+      },
+      "id": "responder-error-03",
+      "name": "Responder a la web: rechazado",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        912,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Formulario de la web": {
+      "main": [
+        [
+          {
+            "node": "Validar envío",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validar envío": {
+      "main": [
+        [
+          {
+            "node": "¿Envío válido?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Envío válido?": {
+      "main": [
+        [
+          {
+            "node": "Guardar envío",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Responder a la web: rechazado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Guardar envío": {
+      "main": [
+        [
+          {
+            "node": "Crear o actualizar contacto en HubSpot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Crear o actualizar contacto en HubSpot": {
+      "main": [
+        [
+          {
+            "node": "Responder a la web: recibido",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Responder a la web: recibido": {
+      "main": [
+        [
+          {
+            "node": "Avisar por correo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

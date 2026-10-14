@@ -6,17 +6,19 @@ nombres, dominios, identificadores y reglas de negocio de cada cliente se han su
 valores de ejemplo.
 
 > **In English.** Production n8n workflows I built for B2B companies, published in anonymized
-> form: an AI email-to-CRM lead classifier, a two-step CRM data cleanup with human approval, and
-> the architecture of an AI quote generator. Code and docs are in Spanish. More about my work at
+> form: an AI email-to-CRM lead classifier, a two-step CRM data cleanup with human approval, a
+> website-form-to-HubSpot pipeline (live on my own site), and the architecture of an AI quote
+> generator. Code and docs are in Spanish. More about my work at
 > [exponencialesfirm.com/en](https://exponencialesfirm.com/en/).
 
 | # | Flujo | Qué resuelve | Piezas |
 |---|---|---|---|
 | 01 | [Correo comercial → CRM](#01--correo-comercial--crm) | Los contactos que llegan por correo dejan de cargarse a mano en el CRM | Gmail · Claude · HubSpot API |
 | 02 | [Limpieza de contactos con aprobación](#02--limpieza-de-contactos-con-aprobación) | Corrige miles de contactos sin riesgo: primero propone, después aplica | HubSpot API · Data Tables |
-| 03 | [Cotizaciones automáticas](#03--cotizaciones-automáticas-arquitectura) | De unas notas por correo a una propuesta en Word, lista para enviar | Gmail · Claude · Drive · Word |
+| 03 | [Formulario web → CRM](#03--formulario-web--crm) | Los contactos de la web entran solos al CRM, sin pasar por el filtro de spam | Webhook · HubSpot API · Data Tables · Gmail |
+| 04 | [Cotizaciones automáticas](#04--cotizaciones-automáticas-arquitectura) | De unas notas por correo a una propuesta en Word, lista para enviar | Gmail · Claude · Drive · Word |
 
-Una idea se repite en los tres: **el modelo propone y el código decide**. La IA redacta,
+Una idea se repite en todos: **el modelo propone y el código decide**. La IA redacta,
 clasifica o extrae; después, código normal valida cada dato antes de que toque el CRM o salga
 hacia un cliente.
 
@@ -102,7 +104,50 @@ código en [`code/02-limpieza-crm/`](code/02-limpieza-crm/)
 
 ---
 
-## 03 · Cotizaciones automáticas (arquitectura)
+## 03 · Formulario web → CRM
+
+**Funciona en vivo** en el formulario de contacto y la lista de espera de
+[exponencialesfirm.com](https://exponencialesfirm.com/#contacto).
+
+**Problema.** Quería un formulario con el diseño de mi web, no el incrustado de HubSpot. Pero
+los envíos que llegan a HubSpot por su API pública de formularios, sin las señales del formulario
+incrustado, acaban en la carpeta de spam y no crean el contacto.
+
+**Qué hace.** El formulario de la web envía los datos a un webhook de n8n, que crea el contacto
+directamente por la API de CRM, con un token propio. A esa vía HubSpot no le aplica el filtro de
+spam.
+
+```mermaid
+flowchart LR
+  A[Formulario<br>de la web] --> B[Webhook<br>solo tu dominio] --> C[Validar envío<br>campo trampa]
+  C -- válido --> D[(Data Table<br>respaldo)] --> E[Upsert del contacto<br>HubSpot API] --> F[Responder<br>a la web] --> G[Aviso<br>por correo]
+  C -- no válido --> H[Responder<br>con el motivo]
+```
+
+**Decisiones de diseño**
+
+- **Primero se guarda, después se envía.** Cada envío queda en una Data Table antes de llamar a
+  HubSpot. Si HubSpot falla, el contacto no se pierde y el aviso por correo lo dice.
+- **Crear o actualizar en una sola llamada.** El *upsert* por email evita duplicados cuando
+  alguien escribe dos veces.
+- **Los campos vacíos no se envían**, para no borrar datos que el contacto ya tenía en el CRM.
+- **La web recibe la respuesta antes del aviso por correo**, así el visitante no espera a Gmail.
+- **Defensa en dos capas.** El navegador valida para dar avisos claros; el flujo vuelve a validar,
+  porque el webhook es público. El campo trampa frena a los robots sin molestar a las personas.
+- **CORS solo para tu dominio**, configurado en el propio nodo Webhook.
+- **La lista de espera usa el mismo flujo**: llega marcada con `tipo = lista_espera` y queda
+  identificada en el mensaje del contacto.
+
+**Columnas de la Data Table:** `fecha`, `tipo`, `nombre`, `apellido`, `correo`, `telefono`,
+`mensaje`, `pagina` (todas de texto).
+
+Archivos: [`workflows/03-formulario-web-a-crm.json`](workflows/03-formulario-web-a-crm.json) ·
+código en [`code/03-formulario-web/`](code/03-formulario-web/), con un
+[formulario HTML de ejemplo](code/03-formulario-web/formulario-ejemplo.html) que ya le habla al flujo.
+
+---
+
+## 04 · Cotizaciones automáticas (arquitectura)
 
 **Problema.** Preparar cada propuesta comercial llevaba horas: pasar las notas de la visita a un
 documento, calcular cantidades y totales, dar formato.
@@ -140,7 +185,8 @@ cálculo del cliente, que no me corresponde publicar.
 1. En n8n: **Workflows → Import from file** y elige un JSON de [`workflows/`](workflows/).
 2. Conecta las credenciales que pide cada flujo (no viene ninguna incluida):
    Gmail (OAuth2), HubSpot (token de app privada, como *Bearer Auth*) y Anthropic.
-3. Sustituye los valores de ejemplo: `tuempresa.com`, `TU_PORTAL_ID` y `REEMPLAZAR_ID_DATA_TABLE`.
+3. Sustituye los valores de ejemplo: `tuempresa.com`, `tudominio.com`, `tu@correo.com`,
+   `TU_PORTAL_ID` y `REEMPLAZAR_ID_DATA_TABLE`.
 4. Revisa las listas propias de cada negocio (industrias, normalización de teléfonos, pensada para Chile).
 
 ## Cómo está organizado
@@ -159,9 +205,9 @@ node scripts/build.js    # regenera workflows/*.json
 node scripts/probar.js   # prueba la lógica con datos inventados
 ```
 
-Las pruebas cubren la lógica de los nodos de código. Las versiones anonimizadas no se han
-ejecutado de punta a punta contra cuentas reales: antes de usarlas en producción, pruébalas en
-tu propio entorno.
+Las pruebas cubren la lógica de los nodos de código. Las versiones anonimizadas de los flujos 01 y
+02 no se han ejecutado de punta a punta contra cuentas reales; el 03 es la versión genérica del que
+funciona en mi web. Antes de usarlos en producción, pruébalos en tu propio entorno.
 
 ---
 

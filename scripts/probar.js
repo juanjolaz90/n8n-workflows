@@ -7,7 +7,7 @@ const assert = require('assert');
 
 const cargar = (rel) => fs.readFileSync(path.join(__dirname, '..', 'code', rel), 'utf8');
 const ejecutar = (rel, items, otros = {}) => {
-  const $input = { all: () => items };
+  const $input = { all: () => items, first: () => items[0] };
   const $ = (nombre) => ({
     all: () => otros[nombre] || [],
     itemMatching: (i) => (otros[nombre] || [])[i],
@@ -81,6 +81,24 @@ console.log('02 · Proponer correcciones');
   assert.strictEqual(hechas.length, lotes[0].json.rowIds.length); ok('solo marca las filas de los lotes que HubSpot confirma');
   const fallidas = ejecutar('02-limpieza-crm/filas-aplicadas.js', [{ json: { status: 'error' } }], { 'Preparar lotes': lotes });
   assert.strictEqual(fallidas.length, 0); ok('un lote fallido deja sus filas pendientes');
+}
+
+console.log('03 · Validar envío del formulario web');
+{
+  const validar = (body) => ejecutar('03-formulario-web/validar-envio.js', [{ json: { body } }])[0].json;
+
+  const bien = validar({ firstname: '  Ana ', lastname: 'Ruiz', email: 'Ana@Ejemplo.COM', phone: '', message: 'Hola', pagina: 'https://tudominio.com/' });
+  assert.strictEqual(bien.valido, true); ok('acepta un envío completo');
+  assert.strictEqual(bien.email, 'ana@ejemplo.com'); ok('normaliza el correo a minúsculas');
+  assert.ok(!('phone' in bien.propiedades)); ok('no manda al CRM los campos vacíos, para no borrar datos que ya existían');
+
+  const lista = validar({ firstname: 'Luis', lastname: 'Soto', email: 'luis@ejemplo.com', tipo: 'lista_espera' });
+  assert.ok(lista.propiedades.message.startsWith('Lista de espera')); ok('marca en el mensaje a quien se apunta a la lista de espera');
+
+  assert.strictEqual(validar({ firstname: 'a', lastname: 'b', email: 'a@b.co', empresa_web: 'x' }).motivo, 'trampa'); ok('rechaza a los robots que rellenan el campo trampa');
+  assert.strictEqual(validar({ firstname: 'Ana', email: 'ana@ejemplo.com' }).motivo, 'faltan_datos'); ok('rechaza un envío sin apellido');
+  assert.strictEqual(validar({ firstname: 'Ana', lastname: 'Ruiz', email: 'sin-arroba' }).motivo, 'correo_invalido'); ok('rechaza un correo inválido');
+  assert.strictEqual(validar({}).valido, false); ok('un cuerpo vacío no rompe el nodo');
 }
 
 console.log('\nTodo correcto.');

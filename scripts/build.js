@@ -300,3 +300,115 @@ guardar('02b-limpieza-crm-aplicar.json', {
   },
   settings: { executionOrder: 'v1' },
 });
+
+// ───────────────────── 03 · Formulario web → CRM ─────────────────────
+const V = (campo) => `$("Validar envío").item.json.${campo}`;
+const columna = (id) => ({ id, displayName: id, required: false, defaultMatch: false, display: true, type: 'string', canBeUsedToMatch: true });
+
+guardar('03-formulario-web-a-crm.json', {
+  name: 'Formulario web → CRM (sin el filtro de spam de HubSpot)',
+  nodes: [
+    nota('nota-03',
+      '## Formulario web → CRM\n\n' +
+      'Recibe el formulario de tu web (contacto o lista de espera) y crea el contacto en HubSpot.\n\n' +
+      '1. Valida los datos y descarta robots (campo trampa `empresa_web`).\n' +
+      '2. Guarda el envío en una Data Table: si HubSpot falla, no se pierde.\n' +
+      '3. Crea o actualiza el contacto en HubSpot por la API de CRM (upsert por email).\n' +
+      '4. Responde a la web y avisa por correo.\n\n' +
+      '**Antes de activar:** cambia el dominio en "Allowed Origins" del Webhook, crea la Data Table ' +
+      '(columnas en el README) y pon su ID, conecta HubSpot (Bearer con un token de app privada con ' +
+      '`crm.objects.contacts.write`) y Gmail, y cambia `tu@correo.com`.',
+      [-32, -352], 360, 560),
+    {
+      parameters: {
+        httpMethod: 'POST', path: 'contacto-web', authentication: 'none', responseMode: 'responseNode',
+        options: { allowedOrigins: 'https://tudominio.com' },
+      },
+      id: 'webhook-03', name: 'Formulario de la web',
+      type: 'n8n-nodes-base.webhook', typeVersion: 2.1, position: [0, 96],
+    },
+    {
+      parameters: { mode: 'runOnceForAllItems', language: 'javaScript', jsCode: leer('03-formulario-web/validar-envio.js') },
+      id: 'validar-03', name: 'Validar envío',
+      type: 'n8n-nodes-base.code', typeVersion: 2, position: [272, 224],
+    },
+    {
+      parameters: {
+        conditions: {
+          options: { caseSensitive: true, leftValue: '', typeValidation: 'strict', version: 2 },
+          conditions: [{ leftValue: '={{ $json.valido }}', operator: { type: 'boolean', operation: 'true', singleValue: true }, rightValue: '' }],
+          combinator: 'and',
+        },
+      },
+      id: 'si-valido-03', name: '¿Envío válido?',
+      type: 'n8n-nodes-base.if', typeVersion: 2.3, position: [496, 224],
+    },
+    {
+      parameters: {
+        resource: 'row', operation: 'insert', dataTableId: TABLA,
+        columns: {
+          mappingMode: 'defineBelow',
+          value: {
+            fecha: `={{ ${V('fecha')} }}`, tipo: `={{ ${V('tipo')} }}`, nombre: `={{ ${V('firstname')} }}`,
+            apellido: `={{ ${V('lastname')} }}`, correo: `={{ ${V('email')} }}`, telefono: `={{ ${V('phone')} }}`,
+            mensaje: `={{ ${V('message')} }}`, pagina: `={{ ${V('pagina')} }}`,
+          },
+          schema: ['fecha', 'tipo', 'nombre', 'apellido', 'correo', 'telefono', 'mensaje', 'pagina'].map(columna),
+        },
+      },
+      id: 'guardar-03', name: 'Guardar envío',
+      type: 'n8n-nodes-base.dataTable', typeVersion: 1.1, position: [800, 320],
+    },
+    {
+      parameters: {
+        method: 'POST',
+        url: 'https://api.hubapi.com/crm/v3/objects/contacts/batch/upsert',
+        authentication: 'genericCredentialType',
+        genericAuthType: 'httpBearerAuth',
+        sendBody: true, contentType: 'json', specifyBody: 'json',
+        jsonBody: `={{ JSON.stringify({ inputs: [{ idProperty: "email", id: ${V('email')}, properties: ${V('propiedades')} }] }) }}`,
+        options: { response: { response: { fullResponse: true, neverError: true } }, timeout: 10000 },
+      },
+      id: 'hubspot-03', name: 'Crear o actualizar contacto en HubSpot',
+      type: 'n8n-nodes-base.httpRequest', typeVersion: 4.5, position: [1024, 320],
+      onError: 'continueRegularOutput',
+    },
+    {
+      parameters: { respondWith: 'json', responseBody: '{ "ok": true }', options: { responseCode: 200 } },
+      id: 'responder-ok-03', name: 'Responder a la web: recibido',
+      type: 'n8n-nodes-base.respondToWebhook', typeVersion: 1.5, position: [1328, 320],
+    },
+    {
+      parameters: {
+        resource: 'message', operation: 'send', sendTo: 'tu@correo.com',
+        subject: `={{ (${V('tipo')} === "lista_espera" ? "Lista de espera" : "Contacto web") + ": " + ${V('firstname')} + " " + ${V('lastname')} }}`,
+        emailType: 'text',
+        message: `={{ "Nuevo envío desde la web (" + ${V('tipo')} + ")\n\nNombre: " + ${V('firstname')} + " " + ${V('lastname')} + "\nCorreo: " + ${V('email')} + "\nTeléfono: " + (${V('phone')} || "(no indicó)") + "\nPágina: " + ${V('pagina')} + "\n\nMensaje:\n" + (${V('message')} || "(sin mensaje)") + "\n\nHubSpot: " + ([200, 201, 207].includes($("Crear o actualizar contacto en HubSpot").item.json.statusCode) ? "contacto creado o actualizado" : "NO se pudo guardar el contacto (código " + $("Crear o actualizar contacto en HubSpot").item.json.statusCode + "). Los datos están en la Data Table.") }}`,
+        options: { appendAttribution: false, replyTo: `={{ ${V('email')} }}` },
+      },
+      id: 'avisar-03', name: 'Avisar por correo',
+      type: 'n8n-nodes-base.gmail', typeVersion: 2.2, position: [1552, 320],
+    },
+    {
+      parameters: {
+        respondWith: 'json',
+        responseBody: `={{ JSON.stringify({ ok: false, motivo: ${V('motivo')} }) }}`,
+        options: { responseCode: 400 },
+      },
+      id: 'responder-error-03', name: 'Responder a la web: rechazado',
+      type: 'n8n-nodes-base.respondToWebhook', typeVersion: 1.5, position: [912, 0],
+    },
+  ],
+  connections: {
+    'Formulario de la web': { main: [[{ node: 'Validar envío', type: 'main', index: 0 }]] },
+    'Validar envío': { main: [[{ node: '¿Envío válido?', type: 'main', index: 0 }]] },
+    '¿Envío válido?': { main: [
+      [{ node: 'Guardar envío', type: 'main', index: 0 }],
+      [{ node: 'Responder a la web: rechazado', type: 'main', index: 0 }],
+    ] },
+    'Guardar envío': { main: [[{ node: 'Crear o actualizar contacto en HubSpot', type: 'main', index: 0 }]] },
+    'Crear o actualizar contacto en HubSpot': { main: [[{ node: 'Responder a la web: recibido', type: 'main', index: 0 }]] },
+    'Responder a la web: recibido': { main: [[{ node: 'Avisar por correo', type: 'main', index: 0 }]] },
+  },
+  settings: { executionOrder: 'v1' },
+});

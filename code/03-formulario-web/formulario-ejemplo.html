@@ -1,0 +1,65 @@
+<!doctype html>
+<!--
+  Formulario mínimo que envía al flujo 03 de n8n. Es la misma lógica que usa exponencialesfirm.com,
+  sin el diseño. Cambia DESTINO por la URL de producción de tu webhook y, en el nodo Webhook de n8n,
+  pon tu dominio en "Allowed Origins" (si no, el navegador bloqueará la llamada por CORS).
+-->
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Formulario de contacto</title>
+<style>
+  body{font-family:system-ui,sans-serif;max-width:560px;margin:40px auto;padding:0 16px}
+  label{display:block;margin:14px 0 6px}
+  input,textarea{width:100%;padding:10px;font:inherit;box-sizing:border-box}
+  .trampa{position:absolute;left:-9999px}
+  .estado[data-tipo="error"]{color:#b00020}
+</style>
+</head>
+<body>
+  <form id="contacto" novalidate>
+    <label for="nombre">Nombre *</label><input id="nombre" name="firstname" autocomplete="given-name" required>
+    <label for="apellido">Apellido *</label><input id="apellido" name="lastname" autocomplete="family-name" required>
+    <label for="correo">Correo *</label><input id="correo" name="email" type="email" autocomplete="email" required>
+    <label for="telefono">Teléfono</label><input id="telefono" name="phone" type="tel" autocomplete="tel">
+    <label for="mensaje">¿Cómo te puedo ayudar?</label><textarea id="mensaje" name="message"></textarea>
+    <!-- Campo trampa: invisible para las personas, los robots lo rellenan -->
+    <div class="trampa" aria-hidden="true"><input name="empresa_web" tabindex="-1" autocomplete="off"></div>
+    <label><input type="checkbox" name="acepto" required> Acepto la política de privacidad</label>
+    <button type="submit">Enviar</button>
+    <p class="estado" role="status" aria-live="polite"></p>
+  </form>
+
+<script>
+  (function () {
+    var DESTINO = 'https://TU-INSTANCIA.app.n8n.cloud/webhook/contacto-web';
+    var f = document.getElementById('contacto');
+    var estado = f.querySelector('.estado');
+    var boton = f.querySelector('button');
+    function avisar(texto, tipo) { estado.textContent = texto; estado.setAttribute('data-tipo', tipo || ''); }
+
+    f.addEventListener('submit', function (e) {
+      e.preventDefault();
+      var d = new FormData(f);
+      if (d.get('empresa_web')) return;
+      if (!d.get('firstname').trim() || !d.get('lastname').trim()) { avisar('Completa nombre y apellido.', 'error'); return; }
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(String(d.get('email')).trim())) { avisar('Revisa el correo.', 'error'); return; }
+      if (!f.acepto.checked) { avisar('Falta aceptar la política de privacidad.', 'error'); return; }
+
+      var datos = { tipo: 'contacto', pagina: location.href };
+      ['firstname', 'lastname', 'email', 'phone', 'message'].forEach(function (n) {
+        var v = String(d.get(n) || '').trim();
+        if (v) datos[n] = v;
+      });
+
+      boton.disabled = true;
+      avisar('Enviando…');
+      fetch(DESTINO, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(datos) })
+        .then(function (r) { if (!r.ok) throw new Error(r.status); f.innerHTML = '<p>Gracias, recibí tu mensaje.</p>'; })
+        .catch(function () { boton.disabled = false; avisar('No se pudo enviar. Inténtalo de nuevo.', 'error'); });
+    });
+  })();
+</script>
+</body>
+</html>
